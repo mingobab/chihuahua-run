@@ -1,0 +1,955 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>치와와런</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; display:flex; gap:18px; padding:18px; align-items:flex-start; }
+    canvas { border:1px solid #ddd; border-radius:14px; background:#f7fbff; }
+    .panel { min-width: 380px; color:#444; }
+    .kbd { display:inline-block; padding:2px 8px; border:1px solid #ccc; border-bottom-width:2px; border-radius:8px; font-size:12px; }
+    .hint { color:#555; line-height:1.55; margin: 8px 0; }
+    .small { font-size: 12px; opacity: 0.85; }
+  </style>
+</head>
+<body>
+
+<canvas id="game" width="920" height="480"></canvas>
+
+<div class="panel">
+  <h2 style="margin:0 0 10px 0;">🐶 치와와런</h2>
+
+  <p class="hint">점수: <b id="score">0</b> / 목표: <b id="goal">1500</b> / 최고: <b id="best">0</b></p>
+  <p class="hint">하트: <b id="lives">❤️❤️❤️</b></p>
+  <p class="hint">슈퍼(방구비행/무적): <b id="fly">OFF</b></p>
+  <p class="hint">배빵빵: <b id="bloat">0%</b> <span id="bloatNote"></span></p>
+  <p class="hint">BGM: <b id="bgmState">OFF</b> <span class="small">(M: 음소거)</span></p>
+
+  <p class="hint">조작</p>
+  <ul class="hint">
+    <li><span class="kbd">Enter</span> / 클릭: 다음 / 시작 / 재시작</li>
+    <li><span class="kbd">←</span> <span class="kbd">→</span> 이동</li>
+    <li><span class="kbd">↑</span> 점프</li>
+    <li><span class="kbd">M</span> BGM 음소거/해제</li>
+    <li><span class="kbd">R</span> 스토리 처음부터</li>
+  </ul>
+
+  <p class="hint small">
+    PNG/BGM이 안 뜨면: 파일명이 정확한지 + <b>html이랑 같은 폴더</b>인지 확인해줘.
+    (BGM 파일명은 <code>bgm.m4a</code> 또는 <code>bgm.mp3</code>)
+  </p>
+
+  <p class="hint" id="status"></p>
+</div>
+
+<script>
+(() => {
+  // ===== Canvas =====
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  const W = canvas.width, H = canvas.height;
+
+  // ===== UI =====
+  const scoreEl = document.getElementById("score");
+  const goalEl  = document.getElementById("goal");
+  const bestEl  = document.getElementById("best");
+  const livesEl = document.getElementById("lives");
+  const flyEl   = document.getElementById("fly");
+  const bloatEl = document.getElementById("bloat");
+  const bloatNoteEl = document.getElementById("bloatNote");
+  const statusEl = document.getElementById("status");
+  const bgmStateEl = document.getElementById("bgmState");
+
+  // ===== Goal / Best =====
+  const GOAL_SCORE = 1500;
+  goalEl.textContent = String(GOAL_SCORE);
+
+  let best = Number(localStorage.getItem("chihuahua_best") || 0);
+  bestEl.textContent = best;
+
+  // ===== Game State =====
+  // intro_cutscene -> title -> playing -> gameover -> win_ending -> win_credits
+  let state = "intro_cutscene";
+
+  // ===== Tuning (난이도 낮춤) =====
+  const GROUND_Y = 370;
+  const SKY_Y_BASE = 145;
+
+  const GRAVITY = 2400;
+  const JUMP_V = -900;
+  const MOVE_SPEED = 470;
+
+  const BASE_SPEED = 320;        // ↓ 기본속도 낮춤
+  const SPEED_RAMP = 0.75;       // ↓ 속도 증가 완만
+
+  const SUPER_SECONDS = 3.0;
+  const BLOAT_GAIN = 22;
+  const BLOAT_DECAY = 10;
+  const BLOAT_MAX = 100;
+
+  const INVINCIBLE_SEC = 1.2;    // 맞은 후 무적시간
+
+  const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+
+  // ===== Images =====
+  function loadImage(src) { const img = new Image(); img.src = src; return img; }
+
+  const IMG = {
+    intro_bed:   loadImage("./intro_bed.png"),
+    intro_hand:  loadImage("./intro_hand.png"),
+    intro_lips:  loadImage("./intro_lips.png"),
+    intro_snarl: loadImage("./intro_snarl.png"),
+    ending_bed:  loadImage("./ending_bed.png"),
+
+    ob_poo:   loadImage("./ob_poo.png"),
+    ob_poo2:  loadImage("./ob_poo2.png"),
+    ob_human: loadImage("./ob_human.png"),
+    item_potato: loadImage("./item_potato.png"),
+
+    run1: loadImage("./run1.png"),
+    run2: loadImage("./run2.png"),
+    jump: loadImage("./jump.png"),
+    fly:  loadImage("./fly.png"),
+    fly_bloat: loadImage("./fly_bloat.png"),
+  };
+
+  let anyImageError = false;
+  for (const k of Object.keys(IMG)) IMG[k].onerror = () => { anyImageError = true; };
+
+  // ===== BGM: m4a 우선 -> mp3 fallback =====
+  const bgm = new Audio();
+  bgm.loop = true;
+  bgm.volume = 0.35;
+
+  const bgmSources = [
+    { src: "./bgm.m4a", type: "audio/mp4"  },
+    { src: "./bgm.mp3", type: "audio/mpeg" }
+  ];
+  let bgmEnabled = true;
+  let bgmIndex = -1;
+  let bgmEverTriedPlay = false;
+
+  function canPlay(type) {
+    try {
+      const r = bgm.canPlayType(type);
+      return r === "probably" || r === "maybe";
+    } catch { return false; }
+  }
+
+  function setBgmSource(idx) {
+    bgmIndex = idx;
+    bgm.src = bgmSources[idx].src;
+    bgm.load();
+    bgmStateEl.textContent = "READY";
+  }
+
+  function initBgmSource() {
+    if (!bgmEnabled) return;
+    if (canPlay(bgmSources[0].type)) setBgmSource(0);
+    else if (canPlay(bgmSources[1].type)) setBgmSource(1);
+    else { bgmEnabled = false; bgmStateEl.textContent = "NONE"; }
+  }
+
+  bgm.addEventListener("error", () => {
+    if (!bgmEnabled) return;
+    if (bgmIndex === 0) {
+      setBgmSource(1);
+      bgmEverTriedPlay = false;
+      bgmStateEl.textContent = "FALLBACK";
+    } else {
+      bgmEnabled = false;
+      bgmStateEl.textContent = "NONE";
+      statusEl.textContent = "BGM 파일을 못 불러왔어. bgm.m4a 또는 bgm.mp3를 같은 폴더에 두고 파일명 확인해줘.";
+    }
+  });
+
+  function tryPlayBgm() {
+    if (!bgmEnabled) return;
+    if (bgmIndex < 0) initBgmSource();
+    if (bgmIndex < 0) return;
+
+    if (bgmEverTriedPlay) return;
+    bgmEverTriedPlay = true;
+
+    bgm.play().then(() => {
+      bgmStateEl.textContent = bgm.muted ? "MUTED" : "ON";
+    }).catch(() => {
+      bgmEverTriedPlay = false;
+      bgmStateEl.textContent = "WAIT";
+    });
+  }
+
+  function toggleMute() {
+    if (!bgmEnabled) return;
+    bgm.muted = !bgm.muted;
+    bgmStateEl.textContent = bgm.muted ? "MUTED" : (bgm.paused ? "OFF" : "ON");
+  }
+
+  // ===== Player / Input =====
+  const player = { x:140, y:GROUND_Y, vy:0, onGround:true, flying:false, flyLeft:0, bloat:0 };
+  let facing = "right";
+  const keys = { left:false, right:false };
+
+  // ===== Lives / Invincible =====
+  let lives = 3;
+  let invincibleLeft = 0;
+
+  function drawLives() {
+    livesEl.textContent = "❤️".repeat(lives) + "🖤".repeat(Math.max(0, 3 - lives));
+  }
+
+  // ===== Entities =====
+  const obstacles = [];
+  const items = [];
+  const puffs = [];
+
+  let spawnObsTimer = 0, nextObs = 1.4;   // ↑ 덜 자주
+  let spawnItemTimer = 0, nextItem = 1.6; // ↓ 더 자주
+
+  // ===== Story =====
+  const cutscene = [
+    { imgKey: "intro_bed",   lines: ["작고 귀여운 치와와는", "폭신폭신한 침대에서 낮잠을 자고 있었다."] },
+    { imgKey: "intro_hand",  lines: ["그때 나타난 인간…", "“귀엽다…”라며 만지기 시작했다."] },
+    { imgKey: "intro_lips",  lines: ["……그리고", "다가오는 입술(뽀뽀)!!"] },
+    { imgKey: "intro_snarl", lines: ["도저히 참을 수 없던 치와와는", "이빨을 드러내고 달리기 시작한다!"] },
+  ];
+  let cutIndex = 0;
+
+  // ===== Title crowd =====
+  let titleCrowd = [];
+  function resetTitleCrowd() {
+    titleCrowd = [];
+    const step = 86;
+    const rows = [{ y: GROUND_Y + 8 }, { y: GROUND_Y - 58 }];
+    for (const row of rows) {
+      for (let x = 40; x < W - 40; x += step) {
+        const r = (x * 9301 + row.y * 7919) % 1000;
+        const pose = (r/1000) < 0.10 ? "jump" : "run";
+        const dir = ((r % 7) === 0) ? "left" : "right";
+        titleCrowd.push({ x, y: row.y, pose, dir });
+      }
+    }
+  }
+
+  // ===== Utility =====
+  function rectsOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
+    return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+  }
+  function getSpriteSize(img, scale) {
+    const w = (img && img.width) ? img.width * scale : 64;
+    const h = (img && img.height) ? img.height * scale : 64;
+    return { w, h };
+  }
+
+  function drawImageCover(img) {
+    if (!img || !img.width || !img.height) {
+      ctx.fillStyle = "#dfeaf7";
+      ctx.fillRect(0,0,W,H);
+      ctx.fillStyle = "rgba(0,0,0,0.45)";
+      ctx.fillText("이미지 로딩중…", 20, 30);
+      return;
+    }
+    const iw = img.width, ih = img.height;
+    const scale = Math.max(W / iw, H / ih);
+    const dw = iw * scale, dh = ih * scale;
+    const dx = (W - dw) / 2;
+    const dy = (H - dh) / 2;
+    ctx.drawImage(img, dx, dy, dw, dh);
+  }
+
+  // ===== Background =====
+  let scrollX = 0;
+  function drawBackground() {
+    ctx.fillStyle = "#f7fbff";
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.globalAlpha = 0.60;
+    ctx.fillStyle = "#ffffff";
+    for (let i=0;i<6;i++){
+      const cx = (i*220 + (scrollX*0.14)%220);
+      const cy = 70 + (i%2)*20;
+      ctx.beginPath();
+      ctx.ellipse(W - cx, cy, 44, 18, 0, 0, Math.PI*2);
+      ctx.ellipse(W - cx + 30, cy+6, 30, 14, 0, 0, Math.PI*2);
+      ctx.ellipse(W - cx - 30, cy+6, 28, 12, 0, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = "#e9f4e6";
+    ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+
+    const roadTop = GROUND_Y - 12;
+    ctx.fillStyle = "#c9d7e6";
+    ctx.fillRect(0, roadTop, W, 24);
+
+    ctx.fillStyle = "rgba(255,255,255,0.7)";
+    const dashW = 42, dashH = 6, gap = 26;
+    const offset = (scrollX % (dashW + gap));
+    for (let x = -offset; x < W; x += dashW + gap) {
+      ctx.fillRect(x, roadTop + 9, dashW, dashH);
+    }
+
+    ctx.fillStyle = "rgba(0,0,0,0.12)";
+    ctx.fillRect(0, GROUND_Y - 1, W, 2);
+
+    ctx.fillStyle = "rgba(144,202,249,0.12)";
+    ctx.fillRect(0, SKY_Y_BASE - 60, W, 120);
+  }
+
+  // ===== Dialog =====
+  function drawDialogBox(textLines) {
+    const pad = 16;
+    const boxH = 128;
+    const boxY = H - boxH - 18;
+    const boxX = 26;
+    const boxW = W - 52;
+
+    ctx.globalAlpha = 0.86;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(boxX, boxY, boxW, boxH);
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = "rgba(0,0,0,0.38)";
+    ctx.fillRect(boxX, boxY, boxW, 3);
+    ctx.fillRect(boxX, boxY + boxH - 3, boxW, 3);
+    ctx.fillRect(boxX, boxY, 3, boxH);
+    ctx.fillRect(boxX + boxW - 3, boxY, 3, boxH);
+
+    ctx.fillStyle = "rgba(0,0,0,0.78)";
+    ctx.font = "18px system-ui";
+    let y = boxY + 34;
+    for (const line of textLines) {
+      ctx.fillText(line, boxX + pad, y);
+      y += 26;
+    }
+
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.font = "14px system-ui";
+    ctx.fillText("Enter / Click → 다음", boxX + boxW - 150, boxY + boxH - 18);
+  }
+
+  // ===== Puffs =====
+  function emitPuff(x, y, n=10) {
+    for (let i=0;i<n;i++){
+      puffs.push({
+        x, y,
+        vx: -140 - Math.random()*240,
+        vy: -60 + Math.random()*120,
+        life: 0.45 + Math.random()*0.25
+      });
+    }
+  }
+  function updatePuffs(dt) {
+    for (let i=puffs.length-1;i>=0;i--){
+      const p = puffs[i];
+      p.life -= dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if (p.life <= 0) puffs.splice(i,1);
+    }
+  }
+  function drawPuffs() {
+    for (const p of puffs) {
+      const a = clamp(p.life / 0.7, 0, 1);
+      ctx.globalAlpha = 0.18 * a;
+      ctx.fillStyle = "#90caf9";
+      ctx.fillRect(Math.round(p.x), Math.round(p.y), 6, 6);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // ===== UI helpers =====
+  function updateBloatUI() {
+    const b = Math.round(player.bloat);
+    bloatEl.textContent = `${b}%`;
+    if (b >= 80) bloatNoteEl.textContent = " (너무 빵빵… 비행 거의 못함)";
+    else if (b >= 55) bloatNoteEl.textContent = " (무거워져서 비행 고도 낮아짐)";
+    else bloatNoteEl.textContent = "";
+  }
+
+  // ===== Gameplay variables =====
+  let score = 0;
+  let speed = BASE_SPEED;
+
+  function setFlying(seconds) {
+    player.flying = true;
+    player.flyLeft = Math.max(player.flyLeft, seconds);
+    flyEl.textContent = `ON (${player.flyLeft.toFixed(1)}s)`;
+  }
+  function endFlying() {
+    player.flying = false;
+    player.flyLeft = 0;
+    flyEl.textContent = "OFF";
+  }
+
+  function resetWorld() {
+    obstacles.length = 0;
+    items.length = 0;
+    puffs.length = 0;
+
+    spawnObsTimer = 0; nextObs = 1.2 + Math.random()*1.0;   // ↑ 더 여유
+    spawnItemTimer = 0; nextItem = 1.2 + Math.random()*1.4; // ↓ 고구마 더 자주
+
+    score = 0;
+    speed = BASE_SPEED;
+    scrollX = 0;
+
+    player.x = 140;
+    player.y = GROUND_Y;
+    player.vy = 0;
+    player.onGround = true;
+    player.flying = false;
+    player.flyLeft = 0;
+    player.bloat = 0;
+    invincibleLeft = 0;
+
+    lives = 3;
+    drawLives();
+    updateBloatUI();
+
+    keys.left = keys.right = false;
+    facing = "right";
+
+    scoreEl.textContent = "0";
+    flyEl.textContent = "OFF";
+  }
+
+  function startGame() {
+    state = "playing";
+    statusEl.textContent = "";
+    resetWorld();
+  }
+  function goToTitle() {
+    state = "title";
+    statusEl.textContent = "";
+    resetTitleCrowd();
+  }
+  function resetToStoryStart() {
+    state = "intro_cutscene";
+    cutIndex = 0;
+    statusEl.textContent = "";
+  }
+
+  // ===== Spawn =====
+  function spawnObstacle() {
+    const kind = (Math.random() < 0.55) ? "poo" : "human";
+    const scale = 3;
+
+    if (kind === "poo") {
+      const use2 = Math.random() < 0.5;
+      const img = use2 ? IMG.ob_poo2 : IMG.ob_poo;
+      const w = (img.width || 16) * scale;
+      const h = (img.height || 16) * scale;
+      obstacles.push({ kind:"poo", img, x: W + 40, y: GROUND_Y, w, h });
+    } else {
+      const img = IMG.ob_human;
+      const w = (img.width || 14) * scale;
+      const h = (img.height || 22) * scale;
+      obstacles.push({ kind:"human", img, x: W + 40, y: GROUND_Y + 6, w, h });
+    }
+  }
+
+  function spawnPotato() {
+    const scale = 3;
+    const img = IMG.item_potato;
+    const w = (img.width || 16) * scale;
+    const h = (img.height || 12) * scale;
+    const lane = Math.random() < 0.70 ? "ground" : "air";
+    const y = lane === "ground" ? (GROUND_Y - 46) : (GROUND_Y - 160);
+    items.push({ img, x: W + 40, y, w, h });
+  }
+
+  // ===== Collision rects =====
+  function playerRect() {
+    const scale = 4;
+    const { w, h } = getSpriteSize(IMG.run1, scale);
+    const px = player.x;
+    const py = player.y - h;
+    return { x: px + w*0.22, y: py + h*0.12, w: w*0.56, h: h*0.80 };
+  }
+  function obstacleRect(o) {
+    const top = o.y - o.h;
+    const pad = (o.kind === "human") ? 12 : 8;
+    return { x: o.x + pad, y: top + 8, w: o.w - pad*2, h: o.h - 12 };
+  }
+  function itemRect(it) {
+    return { x: it.x + 8, y: it.y + 6, w: it.w - 16, h: it.h - 12 };
+  }
+
+  // ===== Draw entities =====
+  function drawObstacle(o) {
+    const top = Math.round(o.y - o.h);
+    if (o.img && o.img.width) ctx.drawImage(o.img, Math.round(o.x), top, Math.round(o.w), Math.round(o.h));
+  }
+  function drawItem(it) {
+    if (it.img && it.img.width) ctx.drawImage(it.img, Math.round(it.x), Math.round(it.y), Math.round(it.w), Math.round(it.h));
+  }
+
+  // ===== Draw player =====
+  function choosePlayerFrame(tSec) {
+    const moving = keys.left || keys.right;
+    if (player.flying) {
+      if (player.bloat >= 60 && IMG.fly_bloat.width) return IMG.fly_bloat;
+      return IMG.fly;
+    }
+    if (!player.onGround) return IMG.jump;
+    if (moving) return (Math.floor(tSec * 10) % 2 === 0) ? IMG.run1 : IMG.run2;
+    return IMG.run1;
+  }
+
+  function drawChihuahua(tSec) {
+    const img = choosePlayerFrame(tSec);
+    const scale = 4;
+    const { w, h } = getSpriteSize(img, scale);
+
+    const x = Math.round(player.x);
+    const y = Math.round(player.y - h);
+
+    // invincible blink
+    const blinking = invincibleLeft > 0 && (Math.floor(tSec * 12) % 2 === 0);
+    if (blinking) ctx.globalAlpha = 0.35;
+
+    ctx.globalAlpha = (player.flying ? 0.08 : 0.20) * (blinking ? 0.7 : 1);
+    ctx.fillStyle = "#000";
+    const shadowW = player.flying ? 30 : ((keys.left||keys.right) ? 54 : 64);
+    ctx.beginPath();
+    ctx.ellipse(x + w/2, GROUND_Y + 10, shadowW/2, 7, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.globalAlpha = blinking ? 0.35 : 1;
+
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    if (img && img.width) {
+      const dw = img.width * scale;
+      const dh = img.height * scale;
+
+      // 오른쪽 이동 시 반전(원본이 왼쪽 보고 있다고 가정)
+      if (facing === "right") {
+        ctx.translate(x + dw, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(img, 0, y, dw, dh);
+      } else {
+        ctx.drawImage(img, x, y, dw, dh);
+      }
+    }
+    ctx.restore();
+
+    ctx.globalAlpha = 1;
+  }
+
+  // ===== Title =====
+  function drawTitle(tSec) {
+    drawBackground();
+
+    const scale = 4;
+    const runFrame = (Math.floor(tSec * 8) % 2 === 0) ? IMG.run1 : IMG.run2;
+
+    for (const c of titleCrowd) {
+      const img = (c.pose === "jump") ? IMG.jump : runFrame;
+      if (!img || !img.width) continue;
+      const dw = img.width * scale;
+      const dh = img.height * scale;
+
+      ctx.save();
+      ctx.imageSmoothingEnabled = false;
+      const drawX = Math.round(c.x);
+      const drawY = Math.round(c.y - dh);
+
+      if (c.dir === "right") {
+        ctx.translate(drawX + dw, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(img, 0, drawY, dw, dh);
+      } else {
+        ctx.drawImage(img, drawX, drawY, dw, dh);
+      }
+      ctx.restore();
+    }
+
+    ctx.globalAlpha = 0.18;
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0,0,W,H);
+    ctx.globalAlpha = 1;
+
+    const cardW = 640, cardH = 220;
+    const cardX = (W - cardW)/2;
+    const cardY = 96;
+
+    ctx.globalAlpha = 0.92;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(cardX, cardY, cardW, cardH);
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = "rgba(0,0,0,0.18)";
+    ctx.fillRect(cardX, cardY, cardW, 3);
+    ctx.fillRect(cardX, cardY + cardH - 3, cardW, 3);
+    ctx.fillRect(cardX, cardY, 3, cardH);
+    ctx.fillRect(cardX + cardW - 3, cardY, 3, cardH);
+
+    ctx.fillStyle = "rgba(0,0,0,0.85)";
+    ctx.font = "bold 52px system-ui";
+    ctx.fillText("CHIHUAHUA RUN", cardX + 64, cardY + 88);
+
+    ctx.font = "18px system-ui";
+    ctx.fillStyle = "rgba(0,0,0,0.72)";
+    ctx.fillText("인간의 뽀뽀를 피해… 달려라 치와와!", cardX + 66, cardY + 128);
+
+    ctx.font = "16px system-ui";
+    ctx.fillStyle = "rgba(0,0,0,0.68)";
+    ctx.fillText("Tip: 고구마🍠 먹으면 3초간 방구 추진으로 하늘을 날며 무적!", cardX + 66, cardY + 158);
+    ctx.fillText("하지만 너무 많이 먹으면 배가 빵빵해져서 점점 가라앉는다…", cardX + 66, cardY + 182);
+
+    const pulse = 0.5 + 0.5*Math.sin(tSec*4);
+    ctx.font = "bold 22px system-ui";
+    ctx.fillStyle = `rgba(33,150,243,${0.55 + 0.45*pulse})`;
+    ctx.fillText("Enter / Click → 바로 시작", cardX + 66, cardY + 212);
+
+    if (anyImageError) {
+      ctx.fillStyle = "rgba(0,0,0,0.55)";
+      ctx.font = "12px system-ui";
+      ctx.fillText("일부 PNG 로드 실패(파일명/위치 확인)", 16, H - 16);
+    }
+  }
+
+  // ===== Gameover / Win =====
+  let lastHitKind = null;
+
+  function hardGameOver() {
+    state = "gameover";
+    const finalScore = Math.floor(score);
+    if (finalScore > best) {
+      best = finalScore;
+      localStorage.setItem("chihuahua_best", String(best));
+      bestEl.textContent = best;
+    }
+    if (lastHitKind === "poo") statusEl.textContent = "💩 똥을 밟았다…! (Enter: 재시작 / R: 스토리)";
+    else statusEl.textContent = "🧍 잡혔다…! (Enter: 재시작 / R: 스토리)";
+  }
+
+  function renderGameOver(tSec) {
+    renderPlaying(tSec);
+
+    ctx.globalAlpha = 0.16;
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0,0,W,H);
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = "rgba(255,255,255,0.92)";
+    ctx.fillRect(70, 165, 700, 150);
+
+    ctx.fillStyle = "rgba(0,0,0,0.78)";
+    ctx.font = "bold 26px system-ui";
+    const title = (lastHitKind === "poo") ? "똥을 밟았다…!" : "잡혔다…!";
+    ctx.fillText(title, 92, 212);
+
+    ctx.font = "16px system-ui";
+    ctx.fillText(`점수: ${Math.floor(score)} / 목표: ${GOAL_SCORE}`, 92, 242);
+    ctx.fillText("Enter: 바로 재시작(달리기)   |   R: 스토리 처음부터", 92, 270);
+  }
+
+  const winCreditsLines = [
+    "THE END",
+    "",
+    "치와와는 마침내",
+    "다른 폭신폭신한 침대에 도착했다.",
+    "",
+    "이제 아무도 만지지 않는 곳에서",
+    "다시 깊은 잠에 빠져든다…",
+    "",
+    `Goal achieved: ${GOAL_SCORE} points`,
+    "",
+    "Enter: 다시 달리기 / R: 스토리",
+  ];
+  let winCreditsY = H + 60;
+  function resetWinCredits() { winCreditsY = H + 60; }
+
+  function drawWinEnding() {
+    drawImageCover(IMG.ending_bed);
+    ctx.globalAlpha = 0.18;
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0,0,W,H);
+    ctx.globalAlpha = 1;
+
+    drawDialogBox([
+      "치와와는 마침내 다른 폭신폭신한 침대에 도착했다.",
+      "…그리고 아무도 없는 곳에서 다시 잠에 들었다."
+    ]);
+
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.font = "14px system-ui";
+    ctx.fillText("Enter / Click → 엔딩 크레딧", W - 220, 36);
+  }
+
+  function drawWinCredits(dt) {
+    drawImageCover(IMG.ending_bed);
+    ctx.globalAlpha = 0.22;
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0,0,W,H);
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = "rgba(255,255,255,0.95)";
+    let y = winCreditsY;
+    for (let i=0;i<winCreditsLines.length;i++){
+      const line = winCreditsLines[i];
+      if (i === 0) ctx.font = "bold 40px system-ui";
+      else ctx.font = (line === "" ? "16px system-ui" : "20px system-ui");
+      const w = ctx.measureText(line).width;
+      ctx.fillText(line, (W - w)/2, y);
+      y += (line === "" ? 18 : (i===0 ? 54 : 32));
+    }
+    winCreditsY -= 70 * dt;
+
+    ctx.fillStyle = "rgba(255,255,255,0.80)";
+    ctx.font = "14px system-ui";
+    ctx.fillText("Enter: 다시 달리기 / R: 스토리", 16, H - 18);
+  }
+
+  // ===== Playing update/render =====
+  function renderPlaying(tSec) {
+    drawBackground();
+    for (const it of items) drawItem(it);
+    for (const o of obstacles) drawObstacle(o);
+    drawPuffs();
+    drawChihuahua(tSec);
+
+    // canvas HUD
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.font = "14px system-ui";
+    ctx.fillText(`❤️ ${lives}   Score ${Math.floor(score)} / ${GOAL_SCORE}`, 16, 24);
+
+    if (player.flying) {
+      ctx.globalAlpha = 0.06;
+      ctx.fillStyle = "#90caf9";
+      ctx.fillRect(0, 0, W, H);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function updatePlaying(dt) {
+    // invincible tick
+    if (invincibleLeft > 0) invincibleLeft = Math.max(0, invincibleLeft - dt);
+
+    speed = BASE_SPEED + Math.min(380, score * SPEED_RAMP); // ↓ 램프 완만
+
+    // bloat decay
+    const decay = player.flying ? (BLOAT_DECAY * 0.35) : BLOAT_DECAY;
+    player.bloat = clamp(player.bloat - decay * dt, 0, BLOAT_MAX);
+    updateBloatUI();
+
+    // move left/right
+    let vx = 0;
+    if (keys.left) vx -= MOVE_SPEED;
+    if (keys.right) vx += MOVE_SPEED;
+    player.x += vx * dt;
+    player.x = clamp(player.x, 20, W - 170);
+
+    // flying timer
+    if (player.flying) {
+      player.flyLeft -= dt;
+      if (player.flyLeft <= 0) endFlying();
+      else flyEl.textContent = `ON (${player.flyLeft.toFixed(1)}s)`;
+    }
+
+    // vertical
+    if (player.flying) {
+      const sink = (player.bloat / 100) * 170;
+      const targetY = clamp(SKY_Y_BASE + sink, 120, GROUND_Y - 20);
+      player.y += (targetY - player.y) * clamp(9 * dt, 0, 1);
+      player.vy = 0;
+      player.onGround = false;
+
+      const scale = 4;
+      const { w, h } = getSpriteSize(IMG.run1, scale);
+      emitPuff(player.x + (facing === "right" ? w*0.70 : w*0.30), player.y - h*0.35, 4);
+    } else {
+      player.vy += GRAVITY * dt;
+      player.y += player.vy * dt;
+      if (player.y >= GROUND_Y) {
+        player.y = GROUND_Y;
+        player.vy = 0;
+        player.onGround = true;
+      } else player.onGround = false;
+    }
+
+    // spawn
+    spawnObsTimer += dt;
+    if (spawnObsTimer >= nextObs) {
+      spawnObsTimer = 0;
+      nextObs = 1.15 + Math.random()*1.15; // ↑ 간격 늘림
+      spawnObstacle();
+    }
+
+    spawnItemTimer += dt;
+    if (spawnItemTimer >= nextItem) {
+      spawnItemTimer = 0;
+      nextItem = 1.10 + Math.random()*1.40; // ↓ 아이템 더 자주
+      spawnPotato();
+    }
+
+    // move entities
+    for (let i = obstacles.length - 1; i >= 0; i--) {
+      obstacles[i].x -= speed * dt;
+      if (obstacles[i].x < -340) obstacles.splice(i, 1);
+    }
+    for (let i = items.length - 1; i >= 0; i--) {
+      items[i].x -= (speed * 0.95) * dt;
+      if (items[i].x < -340) items.splice(i, 1);
+    }
+
+    // collect potato
+    const pr = playerRect();
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      const ir = itemRect(it);
+      if (rectsOverlap(pr.x, pr.y, pr.w, pr.h, ir.x, ir.y, ir.w, ir.h)) {
+        player.bloat = clamp(player.bloat + BLOAT_GAIN, 0, BLOAT_MAX);
+        updateBloatUI();
+        setFlying(SUPER_SECONDS);
+        emitPuff(player.x, player.y - 60, 24);
+        items.splice(i, 1);
+        break;
+      }
+    }
+
+    // collide obstacles (ignore while flying)
+    if (!player.flying && invincibleLeft <= 0) {
+      for (let i=0;i<obstacles.length;i++){
+        const o = obstacles[i];
+        const or = obstacleRect(o);
+        if (rectsOverlap(pr.x, pr.y, pr.w, pr.h, or.x, or.y, or.w, or.h)) {
+          lastHitKind = o.kind;
+
+          // 하트 차감
+          lives -= 1;
+          drawLives();
+
+          // 무적 + 해당 장애물 제거(연속 충돌 방지)
+          invincibleLeft = INVINCIBLE_SEC;
+          obstacles.splice(i, 1);
+
+          // 살짝 튕김 효과(점프처럼)
+          player.vy = JUMP_V * 0.55;
+          player.onGround = false;
+
+          if (lives <= 0) {
+            hardGameOver();
+          } else {
+            // lives 남으면 상태 메시지
+            statusEl.textContent = (lastHitKind === "poo")
+              ? `💩 똥 밟았다..! 하트 -1 (남은 하트 ${lives})`
+              : `🧍 잡힐 뻔..! 하트 -1 (남은 하트 ${lives})`;
+          }
+          break;
+        }
+      }
+    }
+
+    updatePuffs(dt);
+
+    // score + scroll
+    score += dt * 10;
+    scoreEl.textContent = String(Math.floor(score));
+    scrollX += speed * dt;
+
+    // win
+    if (Math.floor(score) >= GOAL_SCORE) {
+      state = "win_ending";
+      statusEl.textContent = "🎉 성공! (Enter로 엔딩 크레딧)";
+      const finalScore = Math.floor(score);
+      if (finalScore > best) {
+        best = finalScore;
+        localStorage.setItem("chihuahua_best", String(best));
+        bestEl.textContent = best;
+      }
+    }
+  }
+
+  // ===== Main loop =====
+  let lastTime = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.033, (now - lastTime)/1000);
+    lastTime = now;
+    const tSec = now / 1000;
+
+    if (state === "intro_cutscene") {
+      const scene = cutscene[cutIndex];
+      drawImageCover(IMG[scene.imgKey]);
+      drawDialogBox(scene.lines);
+      ctx.fillStyle = "rgba(0,0,0,0.55)";
+      ctx.font = "bold 22px system-ui";
+      ctx.fillText("STORY", 22, 34);
+
+    } else if (state === "title") {
+      drawTitle(tSec);
+
+    } else if (state === "playing") {
+      updatePlaying(dt);
+      renderPlaying(tSec);
+
+    } else if (state === "gameover") {
+      renderGameOver(tSec);
+
+    } else if (state === "win_ending") {
+      drawWinEnding();
+
+    } else if (state === "win_credits") {
+      drawWinCredits(dt);
+    }
+
+    requestAnimationFrame(loop);
+  }
+
+  // ===== Input =====
+  function advance() {
+    if (state === "intro_cutscene") {
+      cutIndex++;
+      if (cutIndex >= cutscene.length) goToTitle();
+      return;
+    }
+    if (state === "title") { startGame(); return; }
+    if (state === "gameover") { startGame(); return; }
+    if (state === "win_ending") { state = "win_credits"; resetWinCredits(); return; }
+    if (state === "win_credits") { startGame(); return; }
+  }
+
+  document.addEventListener("keydown", (e) => {
+    tryPlayBgm();
+
+    if (e.code === "KeyM") { toggleMute(); return; }
+    if (e.code === "KeyR") { resetToStoryStart(); return; }
+
+    if (e.code === "Enter" || e.code === "Space") { advance(); return; }
+
+    if (state === "playing") {
+      if (e.code === "ArrowLeft")  { keys.left = true; facing = "left"; }
+      if (e.code === "ArrowRight") { keys.right = true; facing = "right"; }
+      if (e.code === "ArrowUp" && !player.flying && player.onGround) {
+        player.vy = JUMP_V;
+        player.onGround = false;
+      }
+    }
+  });
+
+  document.addEventListener("keyup", (e) => {
+    if (e.code === "ArrowLeft") keys.left = false;
+    if (e.code === "ArrowRight") keys.right = false;
+  });
+
+  canvas.addEventListener("click", () => {
+    tryPlayBgm();
+    advance();
+  });
+
+  // ===== Start =====
+  resetTitleCrowd();
+  updateBloatUI();
+  drawLives();
+  bgmStateEl.textContent = "OFF";
+  requestAnimationFrame(loop);
+})();
+</script>
+
+</body>
+</html>
