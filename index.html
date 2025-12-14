@@ -37,7 +37,7 @@
 
   <p class="hint small">
     PNG/BGM이 안 뜨면: 파일명이 정확한지 + <b>html이랑 같은 폴더</b>인지 확인해줘.
-    (BGM 파일명은 <code>bgm.m4a</code> 또는 <code>bgm.mp3</code>)
+    (BGM 파일명은 <code>bgm_v2.mp3</code> 또는 <code>bgm_v2.mp3</code>)
   </p>
 
   <p class="hint" id="status"></p>
@@ -124,8 +124,8 @@
   bgm.volume = 0.35;
 
   const bgmSources = [
-    { src: "./bgm.m4a", type: "audio/mp4"  },
-    { src: "./bgm.mp3", type: "audio/mpeg" }
+    { src: "./bgm_v2.m4a", type: "audio/mp4"  },
+    { src: "./bgm_v2.mp3", type: "audio/mpeg" }
   ];
   let bgmEnabled = true;
   let bgmIndex = -1;
@@ -161,7 +161,7 @@
     } else {
       bgmEnabled = false;
       bgmStateEl.textContent = "NONE";
-      statusEl.textContent = "BGM 파일을 못 불러왔어. bgm.m4a 또는 bgm.mp3를 같은 폴더에 두고 파일명 확인해줘.";
+      statusEl.textContent = "BGM 파일을 못 불러왔어. bgm_v2.mp3 또는 bgm_v2.mp3를 같은 폴더에 두고 파일명 확인해줘.";
     }
   });
 
